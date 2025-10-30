@@ -33,10 +33,17 @@ def kira_ot(rate, jam, jenis):
     else:
         return 0
 
-# Hantar button utama
+# Hantar inline button utama
 def send_main_buttons(chat_id):
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add("👔 Weekday","📅 Weekend","🎉 Public Holiday","💰 Total")
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("👔 Weekday", callback_data="weekday"),
+        types.InlineKeyboardButton("📅 Weekend", callback_data="weekend")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎉 Public Holiday", callback_data="ph"),
+        types.InlineKeyboardButton("💰 Total", callback_data="total")
+    )
     bot.send_message(chat_id, "Sila pilih jenis OT:", reply_markup=markup)
 
 # Start bot
@@ -53,27 +60,27 @@ def set_rate(message):
     bot.send_message(message.chat.id, f"✅ Rate OT disetkan kepada RM {rate:.2f}/jam.")
     send_main_buttons(message.chat.id)
 
-# Pilih OT jenis
-@bot.message_handler(func=lambda m: m.text in ["👔 Weekday","📅 Weekend","🎉 Public Holiday","💰 Total"])
-def pilih_ot(message):
-    chat_id = message.chat.id
+# Callback untuk inline button
+@bot.callback_query_handler(func=lambda call: True)
+def callback_main(call):
+    chat_id = call.message.chat.id
     data = user_sessions.get(chat_id)
     rate = data.get("rate")
     if not rate:
         bot.send_message(chat_id,"⚠️ Sila set rate dulu (contoh: 10.5)")
         return
 
-    text = message.text
-    if text == "👔 Weekday":
+    jenis = call.data
+    if jenis=="weekday":
         bot.send_message(chat_id,"Masukkan bilangan hari untuk setiap preset OT (OT1=3h, OT2=4h, OT3=5h)\nContoh: 2 1 0\nFormat: OT1 OT2 OT3")
         data["waiting_for"] = "weekday"
-    elif text == "📅 Weekend":
+    elif jenis=="weekend":
         bot.send_message(chat_id,"Masukkan bilangan hari kerja weekend (1 hari = 8 jam)")
         data["waiting_for"] = "weekend"
-    elif text == "🎉 Public Holiday":
+    elif jenis=="ph":
         bot.send_message(chat_id,"Masukkan jumlah jam OT Public Holiday")
         data["waiting_for"] = "ph"
-    elif text == "💰 Total":
+    elif jenis=="total":
         total_all = data["weekday"] + data["weekend"] + data["ph"]
         msg = (
             f"📊 Ringkasan OT Anda:\n"
