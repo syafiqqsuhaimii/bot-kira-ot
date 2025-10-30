@@ -1,146 +1,166 @@
 import telebot
+from telebot import types
 from flask import Flask, request
 import os
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Simpan session sementara setiap user
 user_sessions = {}
+
+# OT preset untuk weekday
+PRESET_WEEKDAY = {"OT1": 3, "OT2": 4, "OT3": 5}
 
 # Fungsi kira OT
 def kira_ot(rate, jam, jenis):
     rate = float(rate)
     jam = float(jam)
-
     if jenis == "weekday":
-        total = rate * 1.5 * jam
+        return round(rate * 1.5 * jam, 2)
     elif jenis == "weekend":
         if jam <= 4:
-            total = rate * 0.5 * jam
+            return round(rate * 0.5 * jam, 2)
         elif jam <= 8:
-            total = rate * jam
+            return round(rate * jam, 2)
         else:
-            total = (rate * 8) + (rate * 2.0 * (jam - 8))
+            return round((rate*8) + (rate*2*(jam-8)),2)
     elif jenis == "public holiday":
         if jam <= 8:
-            total = rate * 2.0 * jam
+            return round(rate*2*jam,2)
         else:
-            total = (rate * 2.0 * 8) + (rate * 3.0 * (jam - 8))
+            return round((rate*2*8) + (rate*3*(jam-8)),2)
     else:
-        total = 0
-    return round(total,2)
+        return 0
 
 # Start bot
 @bot.message_handler(commands=["start"])
 def start(message):
-    user_sessions[message.chat.id] = {"weekday": 0, "weekend": 0, "ph": 0, "rate": None}
+    user_sessions[message.chat.id] = {"weekday":0,"weekend":0,"ph":0,"rate":None}
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add("Weekday","Weekend","Public Holiday","Total")
     bot.send_message(
         message.chat.id,
-        "👋 Hai! Saya bot kira OT DBSB Kuantan.\n\n"
-        "Sila masukkan kadar OT per jam (contoh: 12)",
+        "👋 Hai! Saya bot kira OT DBSB Kuantan.\n\nMasukkan kadar OT per jam (contoh: 10.5):",
+        reply_markup=markup
     )
 
-# Set rate
-@bot.message_handler(func=lambda m: m.text.replace('.','',1).isdigit())
+# Set rate (user cuma taip nombor)
+@bot.message_handler(func=lambda m: m.text.replace(".","",1).isdigit())
 def set_rate(message):
     rate = float(message.text)
     user_sessions[message.chat.id]["rate"] = rate
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add("Weekday","Weekend","Public Holiday","Total")
     bot.send_message(
         message.chat.id,
-        f"✅ Rate OT disetkan kepada RM {rate:.2f}/jam.\n\n"
-        "Sila pilih jenis OT:\n- Weekday\n- Weekend\n- Public Holiday"
+        f"✅ Rate OT disetkan kepada RM {rate:.2f}/jam.\nSila pilih jenis OT:",
+        reply_markup=markup
     )
 
-# Weekday OT (preset)
-@bot.message_handler(func=lambda m: m.text.lower() == "weekday")
-def weekday(message):
+# Button OT type
+@bot.message_handler(func=lambda m: m.text in ["Weekday","Weekend","Public Holiday","Total"])
+def pilih_ot(message):
     chat_id = message.chat.id
-    bot.send_message(
-        chat_id,
-        "Masukkan bilangan hari untuk OT1(3h), OT2(4h), OT3(5h)\nFormat: OT1 OT2 OT3\nContoh: 2 1 3"
-    )
+    rate = user_sessions[chat_id].get("rate")
+    if rate is None:
+        bot.send_message(chat_id,"⚠️ Sila set rate dulu. Contoh: 10.5")
+        return
 
-@bot.message_handler(func=lambda m: len(m.text.split())==3 and all(x.isdigit() for x in m.text.split()))
-def weekday_ot(message):
+    jenis = message.text.lower()
+
+    if jenis=="weekday":
+        bot.send_message(chat_id,
+            "Masukkan bilangan hari untuk setiap preset OT (OT1=3h, OT2=4h, OT3=5h)\n"
+            "Contoh: 2 1 0\nFormat: OT1 OT2 OT3"
+        )
+    elif jenis=="weekend":
+        bot.send_message(chat_id,
+            "Masukkan bilangan hari kerja weekend (1 hari = 8 jam)\nContoh: 2"
+        )
+    elif jenis=="public holiday":
+        bot.send_message(chat_id,"Masukkan jumlah jam OT untuk Public Holiday")
+    elif jenis=="total":
+        data = user_sessions.get(chat_id)
+        if not data or not data["rate"]:
+            bot.send_message(chat_id,"⚠️ Sila set rate dulu")
+            return
+        total_all = data["weekday"] + data["weekend"] + data["ph"]
+        msg = (
+            f"📊 Ringkasan OT Anda:\n\n"
+            f"🏢 Weekday: RM {data['weekday']:.2f}\n"
+            f"📅 Weekend: RM {data['weekend']:.2f}\n"
+            f"🎉 Public Holiday: RM {data['ph']:.2f}\n\n"
+            f"💵 Total Keseluruhan: RM {total_all:.2f}"
+        )
+        bot.send_message(chat_id,msg)
+        return
+
+    user_sessions[chat_id]["waiting_for"] = jenis
+
+# Terima jumlah hari / jam OT
+@bot.message_handler(func=lambda m: True)
+def terima_ot(message):
     chat_id = message.chat.id
     data = user_sessions.get(chat_id)
-    if not data or not data["rate"]:
-        bot.send_message(chat_id, "⚠️ Sila set rate dulu.")
+    if not data or not data.get("waiting_for"):
         return
-    ot1, ot2, ot3 = map(int, message.text.split())
-    rate = data["rate"]
-    total_ot1 = kira_ot(rate, ot1*3, "weekday")
-    total_ot2 = kira_ot(rate, ot2*4, "weekday")
-    total_ot3 = kira_ot(rate, ot3*5, "weekday")
-    total_weekday = total_ot1 + total_ot2 + total_ot3
-    data["weekday"] = total_weekday
-    bot.send_message(
-        chat_id,
-        f"💰 Jumlah OT Weekday:\nOT1: RM {total_ot1:.2f}\nOT2: RM {total_ot2:.2f}\nOT3: RM {total_ot3:.2f}\n✅ Total Weekday: RM {total_weekday:.2f}"
-    )
 
-# Weekend OT (jumlah hari)
-@bot.message_handler(func=lambda m: m.text.lower() == "weekend")
-def weekend(message):
-    bot.send_message(message.chat.id, "Masukkan bilangan hari OT weekend (1 hari = 8 jam)")
+    jenis = data["waiting_for"]
+    rate = data.get("rate")
 
-@bot.message_handler(func=lambda m: m.text.isdigit())
-def weekend_ot(message):
-    chat_id = message.chat.id
-    data = user_sessions.get(chat_id)
-    if not data or not data["rate"]:
-        return
-    if message.text.isdigit() and "weekend_done" not in data:
-        days = int(message.text)
-        rate = data["rate"]
-        total_weekend = kira_ot(rate, days*8, "weekend")
-        data["weekend"] = total_weekend
-        data["weekend_done"] = True
-        bot.send_message(chat_id, f"💰 Jumlah OT Weekend ({days} hari): RM {total_weekend:.2f}")
+    try:
+        if jenis=="weekday":
+            vals = list(map(int,message.text.strip().split()))
+            if len(vals)!=3:
+                bot.send_message(chat_id,"❌ Format salah. Contoh: 2 1 0")
+                return
+            total = 0
+            msg = "💰 Jumlah OT Weekday:\n"
+            for i,ot_key in enumerate(["OT1","OT2","OT3"]):
+                jam = PRESET_WEEKDAY[ot_key]
+                hari = vals[i]
+                subtotal = kira_ot(rate,jam,"weekday")*hari
+                msg += f"{ot_key} ({jam} jam x {hari} hari): RM {subtotal:.2f}\n"
+                total += subtotal
+            data["weekday"] += total
+            bot.send_message(chat_id,msg+f"\n✅ Total Weekday OT: RM {total:.2f}")
 
-# Public Holiday OT
-@bot.message_handler(func=lambda m: m.text.lower() == "public holiday")
-def ph(message):
-    bot.send_message(message.chat.id, "Masukkan jumlah jam OT Public Holiday")
+        elif jenis=="weekend":
+            hari = int(message.text.strip())
+            jam_total = hari * 8
+            subtotal = kira_ot(rate,8,"weekend") * hari
+            data["weekend"] += subtotal
+            bot.send_message(chat_id,
+                f"💰 Jumlah OT Weekend:\n{hari} hari x 8 jam/hari = {jam_total} jam\n"
+                f"✅ Total Weekend OT: RM {subtotal:.2f}"
+            )
+        else: # public holiday
+            jam = float(message.text.strip())
+            subtotal = kira_ot(rate,jam,"public holiday")
+            data["ph"] += subtotal
+            bot.send_message(chat_id,f"💰 Jumlah OT Public Holiday: RM {subtotal:.2f}")
 
-@bot.message_handler(func=lambda m: m.text.replace('.','',1).isdigit() and "weekend_done" in user_sessions.get(m.chat.id,{}))
-def ph_ot(message):
-    chat_id = message.chat.id
-    data = user_sessions.get(chat_id)
-    rate = data["rate"]
-    jam = float(message.text)
-    total_ph = kira_ot(rate, jam, "public holiday")
-    data["ph"] = total_ph
-    bot.send_message(chat_id, f"💰 Jumlah OT Public Holiday: RM {total_ph:.2f}")
+    except:
+        bot.send_message(chat_id,"❌ Format salah. Sila taip nombor sahaja.")
 
-# Total
-@bot.message_handler(commands=["total"])
-def total(message):
-    data = user_sessions.get(message.chat.id)
-    if not data or not data["rate"]:
-        bot.send_message(message.chat.id, "⚠️ Sila set rate dulu")
-        return
-    total_all = data["weekday"] + data["weekend"] + data["ph"]
-    bot.send_message(
-        message.chat.id,
-        f"📊 Ringkasan OT Anda:\n🏢 Weekday: RM {data['weekday']:.2f}\n📅 Weekend: RM {data['weekend']:.2f}\n🎉 Public Holiday: RM {data['ph']:.2f}\n💵 Total Keseluruhan: RM {total_all:.2f}"
-    )
+    data["waiting_for"] = None
 
-# Flask server
+# Flask server untuk Koyeb
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot is running!"
 
-@app.route('/webhook', methods=["POST"])
+@app.route('/webhook',methods=["POST"])
 def webhook():
     json_str = request.stream.read().decode("UTF-8")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "OK", 200
+    return "OK",200
 
-if __name__ == "__main__":
+if __name__=="__main__":
     port = int(os.environ.get("PORT",8000))
     print("✅ Bot OT is starting on port", port)
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0",port=port)
