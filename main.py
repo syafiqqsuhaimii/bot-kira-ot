@@ -1,112 +1,138 @@
+import telebot
+from flask import Flask, request
 import os
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-)
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-user_ot = {}
-user_state = {}
+# Simpan data sementara untuk setiap user
+user_sessions = {}
 
-def kira_weekday(jam, rate): return jam * rate * 1.5
-def kira_weekend(jam, rate):
-    if jam <= 4: return jam * rate * 0.5
-    elif jam <= 8: return jam * rate
-    else: return (8 * rate) + ((jam - 8) * rate * 2.0)
-def kira_public(jam, rate):
-    if jam <= 8: return jam * rate * 2.0
-    else: return (8 * rate * 2.0) + ((jam - 8) * rate * 3.0)
+# Fungsi kira OT
+def kira_ot(rate, jam, jenis):
+    rate = float(rate)
+    jam = float(jam)
 
-def tambah_rekod(uid, jenis, jumlah):
-    if uid not in user_ot:
-        user_ot[uid] = {"rate": None, "weekday": 0.0, "weekend": 0.0, "public": 0.0}
-    user_ot[uid][jenis] += jumlah
+    if jenis == "weekday":
+        total = rate * 1.5 * jam
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    user_state[uid] = "ASK_RATE"
-    await update.message.reply_text("👋 Hai! Sila masukkan kadar sejam (contoh: 12).")
+    elif jenis == "weekend":
+        if jam <= 4:
+            total = rate * 0.5 * jam
+        elif jam <= 8:
+            total = rate * jam
+        else:
+            total = (rate * 8) + (rate * 2.0 * (jam - 8))
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text.strip()
-    state = user_state.get(uid)
-    if state == "ASK_RATE":
-        try:
-            rate = float(text)
-            user_ot[uid] = {"rate": rate, "weekday": 0.0, "weekend": 0.0, "public": 0.0}
-            user_state[uid] = "READY"
-            await update.message.reply_text(f"Kadar sejam diset pada RM{rate:.2f}. Gunakan /weekday, /weekend, /public atau /total.")
-        except ValueError:
-            await update.message.reply_text("Masukkan nombor yang sah, contoh: 12")
-        return
-    elif state in ["ASK_HOURS_weekday", "ASK_HOURS_weekend", "ASK_HOURS_public"]:
-        try:
-            jam = float(text)
-            rate = user_ot[uid]["rate"]
-            if state == "ASK_HOURS_weekday":
-                jumlah = kira_weekday(jam, rate); tambah_rekod(uid, "weekday", jumlah)
-                await update.message.reply_text(f"Weekday OT {jam} jam = RM {jumlah:.2f}")
-            elif state == "ASK_HOURS_weekend":
-                jumlah = kira_weekend(jam, rate); tambah_rekod(uid, "weekend", jumlah)
-                await update.message.reply_text(f"Weekend OT {jam} jam = RM {jumlah:.2f}")
-            else:
-                jumlah = kira_public(jam, rate); tambah_rekod(uid, "public", jumlah)
-                await update.message.reply_text(f"Public Holiday OT {jam} jam = RM {jumlah:.2f}")
-            user_state[uid] = "READY"
-        except ValueError:
-            await update.message.reply_text("Masukkan nombor jam yang sah.")
-        return
-    await update.message.reply_text("Taip /weekday, /weekend, /public, atau /total.")
-
-async def cmd_weekday(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not user_ot.get(uid) or user_ot[uid]["rate"] is None:
-        user_state[uid] = "ASK_RATE"
-        await update.message.reply_text("Masukkan kadar sejam dahulu.")
+    elif jenis == "public holiday":
+        if jam <= 8:
+            total = rate * 2.0 * jam
+        else:
+            total = (rate * 2.0 * 8) + (rate * 3.0 * (jam - 8))
     else:
-        user_state[uid] = "ASK_HOURS_weekday"
-        await update.message.reply_text("Berapa jam OT weekday?")
+        total = 0
 
-async def cmd_weekend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not user_ot.get(uid) or user_ot[uid]["rate"] is None:
-        user_state[uid] = "ASK_RATE"
-        await update.message.reply_text("Masukkan kadar sejam dahulu.")
-    else:
-        user_state[uid] = "ASK_HOURS_weekend"
-        await update.message.reply_text("Berapa jam OT weekend?")
+    return round(total, 2)
 
-async def cmd_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not user_ot.get(uid) or user_ot[uid]["rate"] is None:
-        user_state[uid] = "ASK_RATE"
-        await update.message.reply_text("Masukkan kadar sejam dahulu.")
-    else:
-        user_state[uid] = "ASK_HOURS_public"
-        await update.message.reply_text("Berapa jam OT public holiday?")
 
-async def cmd_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    data = user_ot.get(uid)
-    if not data:
-        await update.message.reply_text("Tiada rekod. /start untuk mula.")
+# Start bot
+@bot.message_handler(commands=["start"])
+def start(message):
+    user_sessions[message.chat.id] = {"weekday": 0, "weekend": 0, "ph": 0, "rate": None}
+    bot.send_message(
+        message.chat.id,
+        "👋 Hai! Saya bot kira OT DBSB Kuantan.\n\n"
+        "Sila masukkan kadar OT per jam (contoh: 10.5)\n\n"
+        "Format: `rate 10.5`",
+        parse_mode="Markdown",
+    )
+
+
+# Set rate
+@bot.message_handler(func=lambda m: m.text.lower().startswith("rate"))
+def set_rate(message):
+    try:
+        rate = float(message.text.split()[1])
+        user_sessions[message.chat.id]["rate"] = rate
+        bot.send_message(
+            message.chat.id,
+            f"✅ Rate OT disetkan kepada RM {rate:.2f}/jam.\n\n"
+            "Sekarang masukkan kiraan OT:\n"
+            "- `weekday 5`\n- `weekend 6`\n- `ph 9`",
+            parse_mode="Markdown",
+        )
+    except:
+        bot.send_message(message.chat.id, "❌ Format salah. Contoh: `rate 12.5`", parse_mode="Markdown")
+
+
+# Kira OT ikut hari
+@bot.message_handler(func=lambda m: any(x in m.text.lower() for x in ["weekday", "weekend", "ph"]))
+def kira(message):
+    chat_id = message.chat.id
+    teks = message.text.lower().split()
+
+    if len(teks) < 2:
+        bot.send_message(chat_id, "❌ Sila taip format betul. Contoh: `weekday 5`")
         return
-    total = data['weekday'] + data['weekend'] + data['public']
-    msg = (f"💰 Jumlah OT anda:\n"           f"- Weekday: RM {data['weekday']:.2f}\n"           f"- Weekend: RM {data['weekend']:.2f}\n"           f"- Public: RM {data['public']:.2f}\n"           f"----------------------\nTotal: RM {total:.2f}")
-    await update.message.reply_text(msg)
 
-async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("weekday", cmd_weekday))
-    app.add_handler(CommandHandler("weekend", cmd_weekend))
-    app.add_handler(CommandHandler("public", cmd_public))
-    app.add_handler(CommandHandler("total", cmd_total))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    await app.run_polling()
+    jenis = teks[0]
+    jam = teks[1]
+    rate = user_sessions[chat_id].get("rate")
+
+    if rate is None:
+        bot.send_message(chat_id, "⚠️ Sila set dulu kadar rate guna arahan: `rate 10.5`")
+        return
+
+    if jenis == "ph":
+        jenis_full = "public holiday"
+    else:
+        jenis_full = jenis
+
+    jumlah = kira_ot(rate, jam, jenis_full)
+    user_sessions[chat_id][jenis] += jumlah
+
+    bot.send_message(chat_id, f"💰 Jumlah OT {jenis_full} ({jam} jam): RM {jumlah:.2f}")
+
+
+# Kira total semua
+@bot.message_handler(commands=["total"])
+def total(message):
+    data = user_sessions.get(message.chat.id)
+    if not data or not data["rate"]:
+        bot.send_message(message.chat.id, "⚠️ Sila set rate dulu: `rate 10.5`")
+        return
+
+    total_all = data["weekday"] + data["weekend"] + data["ph"]
+    msg = (
+        f"📊 *Ringkasan OT Anda:*\n\n"
+        f"🏢 Weekday: RM {data['weekday']:.2f}\n"
+        f"📅 Weekend: RM {data['weekend']:.2f}\n"
+        f"🎉 Public Holiday: RM {data['ph']:.2f}\n\n"
+        f"💵 *Total Keseluruhan:* RM {total_all:.2f}"
+    )
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+
+
+# Flask mini server (untuk Koyeb)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+@app.route('/webhook', methods=["POST"])
+def webhook():
+    json_str = request.stream.read().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
+
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    import threading
+
+    def run_flask():
+        app.run(host="0.0.0.0", port=8080)
+
+    threading.Thread(target=run_flask).start()
+    print("✅ Bot OT is running on Koyeb!")
