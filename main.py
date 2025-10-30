@@ -132,7 +132,7 @@ if __name__ == "__main__":
     import threading
 
     def run_flask():
-        app.run(host="0.0.0.0", port=8080)
+        app.run(host="0.0.0.0", port=8000)
 
     threading.Thread(target=run_flask).start()
     print("✅ Bot OT is running on Koyeb!")
