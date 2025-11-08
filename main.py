@@ -1,158 +1,294 @@
+import os
+import sys
+import logging
 import telebot
 from telebot import types
 from flask import Flask, request
-import os
 
+# ==========================
+# BOT TOKEN
+# ==========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN not set in environment variables!")
+
+telebot.logger.setLevel(logging.DEBUG)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Session sementara setiap user
+# ==========================
+# SESSION
+# ==========================
+# {chat_id: {"rate": float|None, "weekday": float, "weekend": float, "ph": float, "waiting_for": str|None}}
 user_sessions = {}
-
-# OT preset untuk weekday
 PRESET_WEEKDAY = {"OT1": 3, "OT2": 4, "OT3": 5}
 
-# Fungsi kira OT
+# ==========================
+# UTIL
+# ==========================
+def is_number(s: str) -> bool:
+    if not s:
+        return False
+    s = s.strip().replace(",", ".")
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
 def kira_ot(rate, jam, jenis):
-    rate = float(rate)
-    jam = float(jam)
+    rate = float(rate); jam = float(jam)
     if jenis == "weekday":
         return round(rate * 1.5 * jam, 2)
-    elif jenis == "weekend":
-        if jam <= 4:
-            return round(rate * 0.5 * jam, 2)
-        elif jam <= 8:
-            return round(rate * jam, 2)
-        else:
-            return round((rate*8) + (rate*2*(jam-8)),2)
-    elif jenis == "public holiday":
-        if jam <= 8:
-            return round(rate*2*jam,2)
-        else:
-            return round((rate*2*8) + (rate*3*(jam-8)),2)
-    else:
-        return 0
+    if jenis == "weekend":
+        if jam <= 4:  return round(rate * 0.5 * jam, 2)
+        if jam <= 8:  return round(rate * jam, 2)
+        return round((rate * 8) + (rate * 2 * (jam - 8)), 2)
+    if jenis == "public holiday":
+        if jam <= 8:  return round(rate * 2 * jam, 2)
+        return round((rate * 2 * 8) + (rate * 3 * (jam - 8)), 2)
+    return 0
 
-# Hantar inline button utama
-def send_main_buttons(chat_id):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("👔 Weekday", callback_data="weekday"),
-        types.InlineKeyboardButton("📅 Weekend", callback_data="weekend")
-    )
-    markup.add(
+# ==========================
+# INLINE BUTTONS
+# ==========================
+def main_menu():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🏢 Weekday", callback_data="weekday"),
+        types.InlineKeyboardButton("📅 Weekend", callback_data="weekend"),
         types.InlineKeyboardButton("🎉 Public Holiday", callback_data="ph"),
-        types.InlineKeyboardButton("💰 Total", callback_data="total")
+        types.InlineKeyboardButton("💰 Total", callback_data="total"),
     )
-    bot.send_message(chat_id, "Sila pilih jenis OT:", reply_markup=markup)
+    kb.add(
+        types.InlineKeyboardButton("📘 Help", callback_data="help"),
+        types.InlineKeyboardButton("♻️ Reset", callback_data="reset"),
+    )
+    return kb
 
-# Start bot
-@bot.message_handler(commands=["start"])
-def start(message):
-    user_sessions[message.chat.id] = {"weekday":0,"weekend":0,"ph":0,"rate":None,"waiting_for":None}
-    bot.send_message(message.chat.id, "👋 Hai! Saya bot kira OT DBSB Kuantan.\n\nMasukkan kadar OT per jam (contoh: 10.5):")
+def send_main_buttons(chat_id, text="Sila pilih jenis OT:"):
+    bot.send_message(chat_id, text, reply_markup=main_menu())
 
-# Set rate (hanya jika rate belum set)
-@bot.message_handler(func=lambda m: m.text.replace(".", "", 1).isdigit() and user_sessions.get(m.chat.id, {}).get("rate") is None)
-def set_rate(message):
-    rate = float(message.text)
-    user_sessions[message.chat.id]["rate"] = rate
-    bot.send_message(message.chat.id, f"✅ Rate OT disetkan kepada RM {rate:.2f}/jam.")
-    send_main_buttons(message.chat.id)
+def send_help(chat_id):
+    bot.send_message(
+        chat_id,
+        "📘 *Cara guna:*\n"
+        "1) Taip *rate sejam* (cth: `12.5`).\n"
+        "2) Guna butang:\n"
+        "   • 🏢 *Weekday* → balas `2 1 0` (OT1=3j, OT2=4j, OT3=5j).\n"
+        "   • 📅 *Weekend* → balas bilangan *hari* (1 hari = 8 jam), cth: `2`.\n"
+        "   • 🎉 *Public Holiday* → balas jumlah *jam*, cth: `9`.\n"
+        "   • 💰 *Total* → ringkasan kiraan.\n\n"
+        "👨‍💼 Administrator: @syafiqqsuhaimii",
+        parse_mode="Markdown",
+        reply_markup=main_menu()
+    )
 
-# Callback untuk inline button
-@bot.callback_query_handler(func=lambda call: True)
-def callback_main(call):
-    chat_id = call.message.chat.id
-    data = user_sessions.get(chat_id)
-    rate = data.get("rate")
-    if not rate:
-        bot.send_message(chat_id,"⚠️ Sila set rate dulu (contoh: 10.5)")
-        return
+def do_reset(chat_id, ask_rate=True):
+    user_sessions[chat_id] = {"rate": None, "weekday": 0.0, "weekend": 0.0, "ph": 0.0, "waiting_for": None}
+    if ask_rate:
+        user_sessions[chat_id]["waiting_for"] = "rate"
+        bot.send_message(chat_id, "Masukkan kadar OT sejam (contoh: 10.5)")
 
-    jenis = call.data
-    if jenis=="weekday":
-        bot.send_message(chat_id,"Masukkan bilangan hari untuk setiap preset OT (OT1=3h, OT2=4h, OT3=5h)\nContoh: 2 1 0\nFormat: OT1 OT2 OT3")
-        data["waiting_for"] = "weekday"
-    elif jenis=="weekend":
-        bot.send_message(chat_id,"Masukkan bilangan hari kerja weekend (1 hari = 8 jam)")
-        data["waiting_for"] = "weekend"
-    elif jenis=="ph":
-        bot.send_message(chat_id,"Masukkan jumlah jam OT Public Holiday")
-        data["waiting_for"] = "ph"
-    elif jenis=="total":
-        total_all = data["weekday"] + data["weekend"] + data["ph"]
-        msg = (
-            f"📊 Ringkasan OT Anda:\n"
-            f"👔 Weekday: RM {data['weekday']:.2f}\n"
-            f"📅 Weekend: RM {data['weekend']:.2f}\n"
-            f"🎉 Public Holiday: RM {data['ph']:.2f}\n\n"
-            f"💰 Total Keseluruhan: RM {total_all:.2f}"
-        )
-        bot.send_message(chat_id, msg)
+# ==========================
+# COMMANDS (help/reset/ping) — masih ada kalau perlu
+# ==========================
+@bot.message_handler(commands=["help"])
+def help_cmd(message):
+    send_help(message.chat.id)
 
-# Terima input OT dari user
+@bot.message_handler(commands=["reset"])
+def reset_cmd(message):
+    do_reset(message.chat.id, ask_rate=True)
+
+@bot.message_handler(commands=["ping"])
+def ping(message):
+    bot.send_message(message.chat.id, "pong")
+
+# ==========================
+# UNIVERSAL HANDLER (teks biasa)
+# ==========================
 @bot.message_handler(func=lambda m: True)
-def terima_ot(message):
+def handle_all(message):
     chat_id = message.chat.id
-    data = user_sessions.get(chat_id)
-    if not data or not data.get("waiting_for"):
+    text = (message.text or "").strip()
+    print(f"🔎 handle_all text='{text}' chat_id={chat_id}", file=sys.stdout, flush=True)
+
+    # Fallback commands
+    if text.startswith("/"):
+        cmd = text.split()[0].lower()
+        if cmd == "/start":
+            do_reset(chat_id, ask_rate=True);  return
+        if cmd == "/help":
+            return send_help(chat_id)
+        if cmd == "/reset":
+            return do_reset(chat_id, ask_rate=True)
+        if cmd == "/ping":
+            return ping(message)
+
+    # Session
+    session = user_sessions.get(chat_id)
+    if not session:
+        do_reset(chat_id, ask_rate=True);  return
+
+    waiting = session.get("waiting_for")
+
+    # Rate diurus dalam webhook (direct). Di sini hanya OT input.
+    if not waiting:
+        if session.get("rate") is not None and not is_number(text):
+            return send_main_buttons(chat_id)
         return
 
-    jenis = data["waiting_for"]
-    rate = data.get("rate")
-
+    # Waiting untuk OT inputs
+    rate = session["rate"]
     try:
-        if jenis == "weekday":
-            vals = list(map(int,message.text.strip().split()))
-            if len(vals) != 3:
-                bot.send_message(chat_id,"❌ Format salah. Contoh: 2 1 0")
-                return
-            total = 0
-            msg = "💰 Jumlah OT Weekday:\n"
-            for i, ot_key in enumerate(["OT1","OT2","OT3"]):
-                jam = PRESET_WEEKDAY[ot_key]
-                hari = vals[i]
-                subtotal = kira_ot(rate,jam,"weekday") * hari
-                msg += f"{ot_key} ({jam} jam x {hari} hari): RM {subtotal:.2f}\n"
+        if waiting == "weekday":
+            parts = list(map(int, text.split()))
+            if len(parts) != 3:
+                bot.send_message(chat_id, "❌ Format salah. Contoh: 2 1 0");  return
+            total = 0.0
+            reply = "💰 Weekday:\n"
+            for i, key in enumerate(["OT1", "OT2", "OT3"]):
+                jam = PRESET_WEEKDAY[key]; hari = parts[i]
+                subtotal = kira_ot(rate, jam, "weekday") * hari
+                reply += f"{key} ({jam}j × {hari}h): RM {subtotal:.2f}\n"
                 total += subtotal
-            data["weekday"] += total
-            bot.send_message(chat_id,msg+f"\n✅ Total Weekday OT: RM {total:.2f}")
+            session["weekday"] += total
+            bot.send_message(chat_id, reply + f"\n✅ Total Weekday: RM {total:.2f}", reply_markup=main_menu())
 
-        elif jenis == "weekend":
-            hari = int(message.text.strip())
-            subtotal = kira_ot(rate,8,"weekend") * hari
-            data["weekend"] += subtotal
-            bot.send_message(chat_id,f"💰 Jumlah OT Weekend:\n{hari} hari x 8 jam/hari\n✅ Total Weekend OT: RM {subtotal:.2f}")
+        elif waiting == "weekend":
+            hari = int(text)
+            subtotal = kira_ot(rate, 8, "weekend") * hari
+            session["weekend"] += subtotal
+            bot.send_message(chat_id, f"💰 Weekend: {hari} hari × 8j = RM {subtotal:.2f}", reply_markup=main_menu())
 
-        elif jenis == "ph":
-            jam = float(message.text.strip())
-            subtotal = kira_ot(rate,jam,"public holiday")
-            data["ph"] += subtotal
-            bot.send_message(chat_id,f"💰 Jumlah OT Public Holiday: RM {subtotal:.2f}")
+        elif waiting == "ph":
+            jam = float(text.replace(",", "."))
+            subtotal = kira_ot(rate, jam, "public holiday")
+            session["ph"] += subtotal
+            bot.send_message(chat_id, f"💰 Public Holiday: RM {subtotal:.2f}", reply_markup=main_menu())
 
-        data["waiting_for"] = None
-        send_main_buttons(chat_id)
+    except Exception as e:
+        bot.send_message(
+            chat_id,
+            "❌ Format salah. Masukkan nombor sahaja.\nJika perlukan bantuan, tekan 📘 Help.",
+            reply_markup=main_menu()
+        )
+        print("❌ Handle OT input error:", repr(e), file=sys.stderr, flush=True)
+    finally:
+        session["waiting_for"] = None
 
-    except:
-        bot.send_message(chat_id,"❌ Format salah. Sila taip nombor sahaja.")
-
-# Flask mini server (untuk Koyeb)
+# ==========================
+# FLASK WEBHOOK — direct handle /start, RATE & CALLBACK
+# ==========================
 app = Flask(__name__)
 
-@app.route('/')
+@app.get("/")
 def home():
     return "Bot is running!"
 
-@app.route('/webhook', methods=["POST"])
+@app.post("/webhook")
 def webhook():
-    json_str = request.stream.read().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
+    raw = request.get_data(as_text=True)
+    print("✅ /webhook received:", raw[:400], file=sys.stdout, flush=True)
+    try:
+        update = telebot.types.Update.de_json(raw)
+
+        if update:
+
+            # ---- CALLBACK QUERY: KENDALI TERUS DI SINI ----
+            if getattr(update, "callback_query", None):
+                cq = update.callback_query
+                chat_id = cq.message.chat.id
+                data = cq.data
+                print(f"🔔 callback_query data='{data}' from chat={chat_id}", file=sys.stdout, flush=True)
+
+                # Sentiasa jawab callback (stop spinner)
+                try:
+                    bot.answer_callback_query(cq.id)
+                except Exception as e:
+                    print("❌ answer_callback_query failed:", repr(e), file=sys.stderr, flush=True)
+
+                # Pastikan sesi
+                session = user_sessions.get(chat_id)
+                if data == "help":
+                    send_help(chat_id);  return "OK", 200
+                if data == "reset":
+                    do_reset(chat_id, ask_rate=True);  return "OK", 200
+
+                if not session or session.get("rate") is None:
+                    user_sessions.setdefault(chat_id, {"rate": None, "weekday": 0.0, "weekend": 0.0, "ph": 0.0, "waiting_for": None})
+                    user_sessions[chat_id]["waiting_for"] = "rate"
+                    bot.send_message(chat_id, "⚠️ Sila masukkan rate sejam dahulu (cth: 10.5).")
+                    return "OK", 200
+
+                # Set state & minta input
+                session["waiting_for"] = data
+                if data == "weekday":
+                    bot.send_message(
+                        chat_id,
+                        "Masukkan hari untuk OT1, OT2, OT3.\nContoh: `2 1 0`\nFormat: OT1 OT2 OT3",
+                        parse_mode="Markdown"
+                    )
+                elif data == "weekend":
+                    bot.send_message(chat_id, "Masukkan *bilangan hari* weekend (1 hari = 8 jam).\nContoh: `2`", parse_mode="Markdown")
+                elif data == "ph":
+                    bot.send_message(chat_id, "Masukkan *jumlah jam* OT Public Holiday.\nContoh: `10`", parse_mode="Markdown")
+                elif data == "total":
+                    msg = (
+                        f"📊 Ringkasan OT:\n"
+                        f"🏢 Weekday: RM {session['weekday']:.2f}\n"
+                        f"📅 Weekend: RM {session['weekend']:.2f}\n"
+                        f"🎉 Public Holiday: RM {session['ph']:.2f}\n\n"
+                        f"💰 Total: RM {session['weekday'] + session['weekend'] + session['ph']:.2f}"
+                    )
+                    bot.send_message(chat_id, msg, reply_markup=main_menu())
+
+                # Dah proses callback → tak perlu pass ke handlers lagi
+                return "OK", 200
+
+            # ---- MESSAGE: /start, /ping & RATE direct ----
+            if getattr(update, "message", None):
+                t_raw = (update.message.text or "").strip()
+                t = t_raw.lower()
+                cid = update.message.chat.id
+
+                if cid not in user_sessions:
+                    user_sessions[cid] = {"rate": None, "weekday": 0.0, "weekend": 0.0, "ph": 0.0, "waiting_for": None}
+
+                if t == "/start":
+                    user_sessions[cid] = {"rate": None, "weekday": 0.0, "weekend": 0.0, "ph": 0.0, "waiting_for": "rate"}
+                    bot.send_message(cid, "Masukkan kadar OT sejam (contoh: 10.5)")
+                    print("✅ Direct /start → ask rate", file=sys.stdout, flush=True)
+                    return "OK", 200
+
+                if t == "/ping":
+                    bot.send_message(cid, "pong ✅ direct")
+                    print("✅ Direct /ping reply sent", file=sys.stdout, flush=True)
+                    return "OK", 200
+
+                # RATE direct
+                sess = user_sessions.get(cid, {})
+                waiting = sess.get("waiting_for")
+                if (waiting == "rate" or sess.get("rate") is None) and is_number(t_raw):
+                    rate = float(t_raw.replace(",", "."))
+                    sess["rate"] = rate
+                    sess["waiting_for"] = None
+                    bot.send_message(cid, f"✅ Rate OT diset: RM {rate:.2f}/jam")
+                    send_main_buttons(cid)
+                    print(f"✅ Direct rate set to {rate} for {cid}", file=sys.stdout, flush=True)
+                    return "OK", 200
+
+        # Jika bukan message/callback (jarang), pass ke handlers biasa
+        bot.process_new_updates([update])
+        print("✅ Update processed OK (fallback handlers)", file=sys.stdout, flush=True)
+    except Exception as e:
+        print("❌ Error processing update:", repr(e), file=sys.stderr, flush=True)
     return "OK", 200
 
-if __name__=="__main__":
-    import threading
-    port = int(os.environ.get("PORT",8000))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port)).start()
-    print("✅ Bot OT is running on Koyeb!")
+# ==========================
+# RUN (Render uses gunicorn)
+# ==========================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    print("✅ Flask running on", port)
+    app.run(host="0.0.0.0", port=port)
